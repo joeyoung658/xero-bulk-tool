@@ -4,3 +4,5 @@ CLIENT_SECRET = enter_your_secret_here
 CSV_FILENAME = invoices.csv
 DRY_RUN = Enabled
 VOID_TYPE = Invoices
+SUPPLIER_NAME = enter_your_supplier_here
+START_DATE = enter_your_start_date_here (YYYY-MM-DD)

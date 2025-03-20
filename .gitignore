@@ -2,3 +2,6 @@ env
 __pycache__
 config.ini
 *.csv
+/invoice_attachments/
+.idea
+/xero_download.log
