@@ -22,6 +22,9 @@ XERO_CONNECTIONS_URL = "https://api.xero.com/connections"
 XERO_CONTACTS_URL = "https://api.xero.com/api.xro/2.0/Contacts"
 XERO_INVOICES_URL = "https://api.xero.com/api.xro/2.0/Invoices"
 
+# File to store downloaded attachments
+DOWNLOADED_SET_FILE = "downloaded_attachments.json"
+
 # Read config.ini
 config = configparser.ConfigParser()
 config.read('config.ini')
@@ -44,6 +47,7 @@ except ValueError:
     logger.error("START_DATE must be in YYYY-MM-DD format")
     sys.exit(1)
 
+
 def get_token():
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
     data = {'grant_type': "client_credentials",
@@ -57,6 +61,7 @@ def get_token():
         print(f"Failed to fetch token: {response.status_code} - {response.text}")
         logger.error(f"Failed to fetch token: {response.status_code} - {response.text}")
         sys.exit(1)
+
 
 def get_tenant_id(token):
     headers = {'Authorization': f"Bearer {token}", 'Accept': 'application/json'}
@@ -77,10 +82,12 @@ def get_tenant_id(token):
         logger.error(f"Failed to fetch tenant ID: {response.status_code} - {response.text}")
         sys.exit(1)
 
+
 def get_xero_api(url, token, tenant_id, params=None):
     headers = {'Authorization': f"Bearer {token}", 'Accept': 'application/json', 'Xero-tenant-id': tenant_id}
     response = requests.get(url, headers=headers, params=params)
     return response
+
 
 def get_contact_id(token, tenant_id, contact_name=SUPPLIER_NAME):
     params = {"where": f'Name=="{contact_name}"'}
@@ -100,6 +107,7 @@ def get_contact_id(token, tenant_id, contact_name=SUPPLIER_NAME):
         print(f"Failed to fetch contact details: {response.status_code} - {response.text}")
         logger.error(f"Failed to fetch contact details: {response.status_code} - {response.text}")
         sys.exit(1)
+
 
 def get_invoices_for_contact(token, tenant_id, contact_id):
     year, month, day = start_date.year, start_date.month, start_date.day
@@ -128,9 +136,12 @@ def get_invoices_for_contact(token, tenant_id, contact_id):
             logger.error(f"Failed to fetch invoices: {response.status_code} - {response.text}")
             sys.exit(1)
 
-    print(f"Found {len(invoices)} invoices for '{SUPPLIER_NAME}' from {start_date.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}")
-    logger.info(f"Found {len(invoices)} invoices for '{SUPPLIER_NAME}' from {start_date.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}")
+    print(
+        f"Found {len(invoices)} invoices for '{SUPPLIER_NAME}' from {start_date.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}")
+    logger.info(
+        f"Found {len(invoices)} invoices for '{SUPPLIER_NAME}' from {start_date.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}")
     return invoices
+
 
 def load_processed_invoices():
     """Load previously processed invoice IDs from the log file."""
@@ -139,29 +150,41 @@ def load_processed_invoices():
         with open('xero_download.log', 'r') as log_file:
             for line in log_file:
                 if "Processing invoice:" in line:
-                    # Extract the invoice ID from the log line
                     parts = line.split("ID: ")
                     if len(parts) > 1:
                         invoice_id = parts[1].split(',')[0].strip()
                         processed.add(invoice_id)
     return processed
 
+
 def load_downloaded_attachments():
-    """Load previously downloaded attachments from the log file."""
+    """Load previously downloaded attachments from JSON file."""
     downloaded = set()
-    if os.path.exists('xero_download.log'):
-        with open('xero_download.log', 'r') as log_file:
-            for line in log_file:
-                if "Downloaded attachment:" in line:
-                    parts = line.split("Downloaded attachment: ")
-                    if len(parts) > 1:
-                        unique_file_name = parts[1].strip()
-                        downloaded.add(unique_file_name)
+    if os.path.exists(DOWNLOADED_SET_FILE):
+        try:
+            with open(DOWNLOADED_SET_FILE, 'r') as f:
+                downloaded = set(json.load(f))
+            logger.info(f"Loaded {len(downloaded)} previously downloaded attachments from {DOWNLOADED_SET_FILE}")
+        except (json.JSONDecodeError, IOError) as e:
+            logger.error(f"Failed to load downloaded attachments from {DOWNLOADED_SET_FILE}: {str(e)}")
     return downloaded
 
+
+def save_downloaded_attachments_set(downloaded_set):
+    """Save the downloaded attachments set to JSON file."""
+    try:
+        with open(DOWNLOADED_SET_FILE, 'w') as f:
+            json.dump(list(downloaded_set), f)
+        logger.info(f"Saved {len(downloaded_set)} downloaded attachments to {DOWNLOADED_SET_FILE}")
+    except IOError as e:
+        logger.error(f"Failed to save downloaded attachments to {DOWNLOADED_SET_FILE}: {str(e)}")
+
+
 def download_invoice_attachment(token, tenant_id, invoice_id, file_name, inv_num, downloaded_set):
+    # Sanitize both invoice number and file name
+    safe_inv_num = inv_num.replace('/', '_').replace('\\', '_')
     safe_file_name = file_name.replace('/', '_').replace('\\', '_')
-    unique_file_name = f"{inv_num}_{safe_file_name}"
+    unique_file_name = f"{safe_inv_num}_{safe_file_name}"
 
     if unique_file_name in downloaded_set:
         print(f"Skipping {unique_file_name} - already downloaded")
@@ -174,16 +197,48 @@ def download_invoice_attachment(token, tenant_id, invoice_id, file_name, inv_num
         'Accept': 'application/octet-stream',
         'Xero-tenant-id': tenant_id
     }
-    response = requests.get(url, headers=headers)
+
+    max_attempts = 3
+    attempt = 1
+
+    while attempt <= max_attempts:
+        response = requests.get(url, headers=headers)
+
+        if save_downloaded_attachments(response, unique_file_name, file_name):
+            downloaded_set.add(unique_file_name)
+            save_downloaded_attachments_set(downloaded_set)
+            break
+        elif response.status_code == 429:
+            if attempt < max_attempts:
+                print(f"Rate limit hit (429). Attempt {attempt}/{max_attempts}. Retrying in 10 seconds...")
+                logger.info(f"Rate limit hit (429). Attempt {attempt}/{max_attempts}. Retrying in 10 seconds...")
+                time.sleep(10)
+                attempt += 1
+            else:
+                print(f"Failed to download {file_name} after {max_attempts} attempts due to rate limiting")
+                logger.error(f"Failed to download {file_name} after {max_attempts} attempts due to rate limiting")
+                break
+        else:
+            break
+
+
+def save_downloaded_attachments(response, unique_file_name, file_name):
     if response.status_code == 200:
         with open(unique_file_name, 'wb') as f:
             f.write(response.content)
         print(f"Downloaded attachment: {unique_file_name}")
         logger.info(f"Downloaded attachment: {unique_file_name}")
+        time.sleep(1)
+        return True
+    elif response.status_code == 429:
+        logger.info(f"Rate limit hit: {response.status_code} - {response.text}")
+        return False
     else:
         print(f"Failed to download {file_name}: {response.status_code} - {response.text}")
         logger.error(f"Failed to download {file_name}: {response.status_code} - {response.text}")
-    time.sleep(1)
+        time.sleep(1)
+        return True
+
 
 def main():
     try:
@@ -210,7 +265,6 @@ def main():
             inv_num = inv.get('InvoiceNumber', inv_id)
             date = inv.get('DateString', 'N/A')
 
-            # Skip if invoice was already processed
             if inv_id in processed_invoices:
                 print(f"Skipping invoice: {inv_num} (ID: {inv_id}) - already processed")
                 logger.info(f"Skipped invoice: {inv_num} (ID: {inv_id}) - already processed")
@@ -239,11 +293,14 @@ def main():
 
         print(f"Processed {new_invoices_processed} new invoices.")
         logger.info(f"Processed {new_invoices_processed} new invoices.")
+        save_downloaded_attachments_set(downloaded_set)
 
     except Exception as err:
         print(f"Error occurred: {str(err)}")
         logger.error(f"Error occurred: {str(err)}")
+        save_downloaded_attachments_set(downloaded_set)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     print("Starting Xero invoice attachment downloader...")
